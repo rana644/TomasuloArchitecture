@@ -1,325 +1,443 @@
-import java.io.BufferedReader;
-import java.io.FileReader;
-import java.io.IOException;
+
+import java.io.*;
 import java.util.*;
-import java.util.stream.Collectors;
 
 public class TomasuloSimulator {
-    public List<Instruction> program = new ArrayList<>();
-    public int pc = 0;
-    public int cycle = 1;
-
-    // Reservation Stations (Fixed sizes)
-    public List<ReservationStation> intRS = new ArrayList<>();
-    public List<ReservationStation> fpAddRS = new ArrayList<>();
-    public List<ReservationStation> fpMulRS = new ArrayList<>();
-    public List<LoadStoreBuffer> loadBuffers = new ArrayList<>();
-    public List<LoadStoreBuffer> storeBuffers = new ArrayList<>();
     
-    public RegisterFile regFile = new RegisterFile();
-    private Map<String, Integer> latencyMap = new HashMap<>();
-    private Map<String, Integer> labels = new HashMap<>();
-
+    private List<Instruction> instructions;
+    private RegisterFile registerFile;
+    private List<ReservationStation> addSubStations;
+    private List<ReservationStation> mulDivStations;
+    private List<LoadBuffer> loadBuffers;
+    private List<StoreBuffer> storeBuffers;
+    private Map<String, Integer> latencies;
+    private int cycle;
+    private int pc;
+    
     public TomasuloSimulator() {
-        // Initialize RS lists
-        for (int i = 0; i < 2; i++) intRS.add(new ReservationStation("Int" + (i + 1)));
-        for (int i = 0; i < 3; i++) fpAddRS.add(new ReservationStation("Add" + (i + 1)));
-        for (int i = 0; i < 2; i++) fpMulRS.add(new ReservationStation("Mul" + (i + 1)));
-        for (int i = 0; i < 3; i++) loadBuffers.add(new LoadStoreBuffer("Load" + (i + 1)));
-        for (int i = 0; i < 2; i++) storeBuffers.add(new LoadStoreBuffer("Store" + (i + 1)));
+        instructions = new ArrayList<Instruction>();
+        registerFile = new RegisterFile();
+        addSubStations = new ArrayList<ReservationStation>();
+        mulDivStations = new ArrayList<ReservationStation>();
+        loadBuffers = new ArrayList<LoadBuffer>();
+        storeBuffers = new ArrayList<StoreBuffer>();
+        latencies = new HashMap<String, Integer>();
+        cycle = 0;
+        pc = 0;
         
-        // Correct Latencies (Standard MIPS/Tomasulo)
-        latencyMap.put("ADD.D", 2); latencyMap.put("SUB.D", 2);
-        latencyMap.put("MUL.D", 10); latencyMap.put("DIV.D", 40);
-        latencyMap.put("L.D", 2); latencyMap.put("S.D", 1);
-        latencyMap.put("DADD", 1); latencyMap.put("DSUB", 1);
-        latencyMap.put("BRANCH", 1);
-    }
-
-    // --- PROGRAM LOADING & PRINTING (Your original methods, slightly trimmed) ---
-    public boolean loadProgram(String filePath) {
-        // ... (Your program loading logic remains here) ...
-        try (BufferedReader br = new BufferedReader(new FileReader(filePath))) {
-            String line;
-            int instructionIndex = 0;
-            while ((line = br.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty() || line.startsWith("#")) continue;
-
-                if (line.endsWith(":")) {
-                    String label = line.substring(0, line.length() - 1);
-                    labels.put(label, instructionIndex); 
-                } else {
-                    program.add(new Instruction(line));
-                    instructionIndex++;
-                }
-            }
-            System.out.println("Program loaded successfully. Total instructions: " + program.size());
-            return true;
-        } catch (IOException e) {
-            System.err.println("Error loading program file: " + e.getMessage());
-            return false;
+        // Initialize stations
+        for (int i = 1; i <= 3; i++) {
+            addSubStations.add(new ReservationStation("Add" + i));
         }
+        for (int i = 1; i <= 2; i++) {
+            mulDivStations.add(new ReservationStation("Mul" + i));
+        }
+        for (int i = 1; i <= 3; i++) {
+            loadBuffers.add(new LoadBuffer("Load" + i));
+        }
+        for (int i = 1; i <= 2; i++) {
+            storeBuffers.add(new StoreBuffer("Store" + i));
+        }
+        
+        // Set latencies
+        latencies.put("ADD.D", 2);
+        latencies.put("SUB.D", 2);
+        latencies.put("MUL.D", 10);
+        latencies.put("DIV.D", 40);
+        latencies.put("L.D", 2);
+        latencies.put("S.D", 2);
     }
     
-    private void printInstructionStatus() {
-        System.out.println("\n=== ? Instruction Status Table ===");
-        System.out.printf("%-20s | %-6s | %-6s | %-6s | %-6s%n", 
-                             "Instruction", "Issue", "Exec S", "Exec E", "Write");
-        System.out.println("----------------------------------------------------------");
-        
-        for (Instruction instr : program) {
-            System.out.printf("%-20s | %-6s | %-6s | %-6s | %-6s%n",
-                instr.raw, 
-                instr.issueCycle > 0 ? instr.issueCycle : "-", 
-                instr.startExecuteCycle > 0 ? instr.startExecuteCycle : "-",
-                instr.endExecuteCycle > 0 ? instr.endExecuteCycle : "-", 
-                instr.writeResultCycle > 0 ? instr.writeResultCycle : "-");
+    public void loadProgram(String filename) throws IOException {
+        BufferedReader reader = new BufferedReader(new FileReader(filename));
+        String line;
+        while ((line = reader.readLine()) != null) {
+            line = line.trim();
+            if (!line.isEmpty() && !line.startsWith("#")) {
+                instructions.add(new Instruction(line));
+            }
         }
+        reader.close();
+        System.out.println("Loaded " + instructions.size() + " instructions");
     }
     
-    // ... (Your printReservationStations and printRegisterFile methods go here) ...
-    private void printReservationStations() { /* ... */ }
-    private void printRegisterFile() { /* ... */ }
-
-    // --- ISSUE STAGE ---
-    private void issue() {
-        if (pc >= program.size()) return;
-
-        Instruction instr = program.get(pc);
-        String op = instr.opCode;
-        
-        List<? extends ReservationStation> targetList = getRSListForOp(op);
-        ReservationStation freeRS = targetList.stream().filter(rs -> !rs.busy).findFirst().orElse(null);
-
-        if (freeRS == null) {
-            // System.out.println("STALL: " + instr.raw + " (No free RS/Buffer)");
-            return; 
-        }
-
-        // --- Renaming and Setup ---
-        freeRS.clear();
-        freeRS.busy = true;
-        freeRS.op = op;
-        freeRS.instruction = instr;
-        freeRS.remainingCycles = getLatency(op);
-        
-        String rs1 = instr.rs1;
-        String rs2 = instr.rs2;
-        String rd = instr.rd;
-
-        // Set Vj/Qj
-        if (rs1 != null) {
-            String QjTag = regFile.rrsStatus.getOrDefault(rs1, "");
-            if (!QjTag.isEmpty()) { freeRS.Qj = QjTag; } 
-            else { freeRS.Vj = regFile.getValue(rs1); }
-        }
-
-        // Set Vk/Qk
-        if (rs2 != null) {
-            String QkTag = regFile.rrsStatus.getOrDefault(rs2, "");
-            if (!QkTag.isEmpty()) { freeRS.Qk = QkTag; } 
-            else { freeRS.Vk = regFile.getValue(rs2); }
-        }
-        
-        // Handle Store value (Vv/Qv)
-        if (op.startsWith("S.D") && freeRS instanceof LoadStoreBuffer) {
-            LoadStoreBuffer storeBuf = (LoadStoreBuffer) freeRS;
-            String QvTag = regFile.rrsStatus.getOrDefault(rd, ""); // RD holds the source value for S.D
-            if (!QvTag.isEmpty()) { storeBuf.Qv = QvTag; }
-            else { storeBuf.Vv = regFile.getValue(rd); }
-            freeRS.Dest = instr.rs1; // Dest is the base reg for address calculation
-        } else if (!op.startsWith("S")) {
-            freeRS.Dest = rd; 
-        }
-        
-        // Update RRS only for result-writing instructions
-        if (freeRS.Dest != null && !op.startsWith("S") && !op.startsWith("B")) {
-             regFile.rrsStatus.put(freeRS.Dest, freeRS.name);
-        }
-
-        // --- Finalize Issue ---
-        instr.issueCycle = cycle;
-        pc++;
-        // System.out.println("ISSUED: " + instr.raw + " -> " + freeRS.name);
-    }
-
-    // --- EXECUTE STAGE (The Correct Timing Logic) ---
-    private void execute() {
-        List<ReservationStation> allStations = getAllActiveRS();
-        
-        for (ReservationStation rs : allStations) {
-            if (!rs.busy) continue;
-            
-            // 1. CHECK OPERANDS READY
-            boolean operandsReady = rs.Qj.isEmpty() && rs.Qk.isEmpty();
-            
-            if (rs.op.startsWith("S.D")) {
-                LoadStoreBuffer lsb = (LoadStoreBuffer) rs;
-                operandsReady = operandsReady && lsb.Qv.isEmpty();
-            }
-            
-            // 2. START EXECUTION (CRITICAL FIX)
-            if (operandsReady && rs.instruction.startExecuteCycle == 0) {
-                
-                // Rule: Start = Max(Issue Cycle, Last Dependency Clear Cycle) + 1
-                int triggerCycle = Math.max(rs.instruction.issueCycle, rs.lastDependencyClearCycle);
-                
-                // CRITICAL: Must start exactly 1 cycle AFTER the trigger event.
-                rs.instruction.startExecuteCycle = triggerCycle + 1;
-                
-                // System.out.println("SCHEDULED: " + rs.instruction.raw + " for C" + rs.instruction.startExecuteCycle);
-            }
-            
-            // 3. CONTINUE EXECUTION (Deduct cycles only if we are in or past the scheduled start cycle)
-            if (rs.instruction.startExecuteCycle > 0 && 
-                rs.instruction.startExecuteCycle <= cycle && 
-                rs.remainingCycles > 0) {
-                rs.remainingCycles--;
-            }
-            
-            // 4. MARK EXECUTION COMPLETE
-            if (rs.remainingCycles == 0 && rs.instruction.endExecuteCycle == 0) {
-                rs.instruction.endExecuteCycle = cycle;
-            }
-        }
+    public void setRegister(String reg, double value) {
+        registerFile.setValue(reg, value);
     }
     
-    // --- WRITE RESULT STAGE (CRITICAL DEPENDENCY TRACKING) ---
-    private void writeResult() {
-        List<ReservationStation> allStations = getAllActiveRS();
-        
-        // 1. Find the winner based on remainingCycles == 0 and oldest issueCycle
-        ReservationStation winnerRS = allStations.stream()
-            .filter(rs -> rs.remainingCycles == 0 && rs.instruction.writeResultCycle == 0)
-            .min(Comparator.comparingInt(rs -> rs.instruction.issueCycle))
-            .orElse(null);
-
-        if (winnerRS == null) return; 
-
-        double result = computeResult(winnerRS);
-        String tag = winnerRS.name;
-        
-        // 2. Broadcast Result (CDB) - Update all dependent RS entries
-        if (!winnerRS.op.startsWith("S")) { // Stores don't broadcast results
-            for (ReservationStation rs : allStations) {
-                boolean dependencyCleared = false;
-
-                if (rs.Qj.equals(tag)) { rs.Vj = result; rs.Qj = ""; dependencyCleared = true; }
-                if (rs.Qk.equals(tag)) { rs.Vk = result; rs.Qk = ""; dependencyCleared = true; }
-                
-                if (rs instanceof LoadStoreBuffer) {
-                    LoadStoreBuffer lsb = (LoadStoreBuffer) rs;
-                    if (lsb.Qv.equals(tag)) { lsb.Vv = result; lsb.Qv = ""; dependencyCleared = true; }
-                }
-                
-                // CRITICAL FIX: Record the cycle when the dependency was resolved
-                if (dependencyCleared) {
-                    rs.lastDependencyClearCycle = cycle; 
-                }
-            }
-        }
-
-        // 3. Update Register File & Clear RRS
-        if (winnerRS.Dest != null && !winnerRS.op.startsWith("S") && !winnerRS.op.startsWith("B")) {
-            regFile.setValue(winnerRS.Dest, result);
-            
-            String currentTag = regFile.rrsStatus.get(winnerRS.Dest);
-            if (currentTag != null && currentTag.equals(tag)) {
-                regFile.rrsStatus.put(winnerRS.Dest, "");
-            }
-        }
-        
-        // 4. Finalize
-        winnerRS.instruction.writeResultCycle = cycle;
-        winnerRS.clear();
-        // System.out.println("WRITE RESULT: " + winnerRS.instruction.raw + " -> C" + cycle);
-    }
-    
-    // --- RUN LOOP ---
     public void run() {
-        System.out.println("\n--- Starting Simulation ---");
+        System.out.println("\n=== Starting Simulation ===\n");
         
-        while ((pc < program.size() || anyBusy()) && cycle < 100) { 
-            // System.out.println("\n===== 🕰️ CYCLE " + cycle + " =====");
-
-            // 1. Write Result (Resolves dependencies and sets lastDependencyClearCycle)
-            writeResult(); 
-
-            // 2. Execute (Uses lastDependencyClearCycle to determine Exec S)
-            execute(); 
-
-            // 3. Issue 
-            issue();
-            
-            // printInstructionStatus();
-            
+        while (!isComplete() && cycle < 1000) {
             cycle++;
+            writeBack();
+            execute();
+            issue();
         }
-        System.out.println("\n--- Simulation Ended ---");
-        printInstructionStatus();
+        
+        printResults();
     }
     
-    // --- HELPERS ---
-    private List<ReservationStation> getAllActiveRS() {
-        List<ReservationStation> allStations = new ArrayList<>();
-        allStations.addAll(intRS);
-        allStations.addAll(fpAddRS);
-        allStations.addAll(fpMulRS);
-        allStations.addAll(loadBuffers);
-        allStations.addAll(storeBuffers);
-        return allStations.stream().filter(rs -> rs.busy).collect(Collectors.toList());
+    private void issue() {
+        if (pc >= instructions.size()) return;
+        
+        Instruction instr = instructions.get(pc);
+        String op = instr.operation;
+        
+        // Find free station
+        Object station = null;
+        if (op.equals("ADD.D") || op.equals("SUB.D")) {
+            station = findFreeStation(addSubStations);
+        } else if (op.equals("MUL.D") || op.equals("DIV.D")) {
+            station = findFreeStation(mulDivStations);
+        } else if (op.equals("L.D")) {
+            station = findFreeLoad();
+        } else if (op.equals("S.D")) {
+            station = findFreeStore();
+        }
+        
+        if (station == null) return;
+        
+        if (station instanceof LoadBuffer) {
+            LoadBuffer lb = (LoadBuffer) station;
+            lb.busy = true;
+            lb.operation = op;
+            lb.instruction = instr;
+            lb.cyclesLeft = latencies.get(op);
+            lb.address = instr.immediate;
+            
+            String baseReg = instr.rs1;
+            String baseTag = registerFile.getTag(baseReg);
+            if (baseTag != null) {
+                lb.qBase = baseTag;
+            } else {
+                lb.vBase = registerFile.getValue(baseReg);
+                lb.baseReady = true;
+            }
+            
+            registerFile.setTag(instr.rd, lb.name);
+            
+        } else if (station instanceof StoreBuffer) {
+            StoreBuffer sb = (StoreBuffer) station;
+            sb.busy = true;
+            sb.operation = op;
+            sb.instruction = instr;
+            sb.cyclesLeft = latencies.get(op);
+            sb.address = instr.immediate;
+            
+            String baseReg = instr.rs1;
+            String baseTag = registerFile.getTag(baseReg);
+            if (baseTag != null) {
+                sb.qBase = baseTag;
+            } else {
+                sb.vBase = registerFile.getValue(baseReg);
+                sb.baseReady = true;
+            }
+            
+            String valueReg = instr.rd;
+            String valueTag = registerFile.getTag(valueReg);
+            if (valueTag != null) {
+                sb.qValue = valueTag;
+            } else {
+                sb.vValue = registerFile.getValue(valueReg);
+                sb.valueReady = true;
+            }
+            
+        } else if (station instanceof ReservationStation) {
+            ReservationStation rs = (ReservationStation) station;
+            rs.busy = true;
+            rs.operation = op;
+            rs.instruction = instr;
+            rs.cyclesLeft = latencies.get(op);
+            
+            String src1 = instr.rs1;
+            String tag1 = registerFile.getTag(src1);
+            if (tag1 != null) {
+                rs.qj = tag1;
+            } else {
+                rs.vj = registerFile.getValue(src1);
+                rs.vjReady = true;
+            }
+            
+            String src2 = instr.rs2;
+            String tag2 = registerFile.getTag(src2);
+            if (tag2 != null) {
+                rs.qk = tag2;
+            } else {
+                rs.vk = registerFile.getValue(src2);
+                rs.vkReady = true;
+            }
+            
+            registerFile.setTag(instr.rd, rs.name);
+        }
+        
+        instr.issueTime = cycle;
+        pc++;
     }
     
-    private List<? extends ReservationStation> getRSListForOp(String op) {
-        if (op.startsWith("ADD") || op.startsWith("SUB")) return fpAddRS;
-        if (op.startsWith("MUL") || op.startsWith("DIV")) return fpMulRS;
-        if (op.startsWith("L.D")) return loadBuffers;
-        if (op.startsWith("S.D")) return storeBuffers;
-        return intRS; 
+    private void execute() {
+        executeStations(addSubStations);
+        executeStations(mulDivStations);
+        executeLoads();
+        executeStores();
     }
     
-    private int getLatency(String op) {
-        return latencyMap.getOrDefault(op, 1);
+    private void executeStations(List<ReservationStation> stations) {
+        for (ReservationStation rs : stations) {
+            if (!rs.busy) continue;
+            if (!rs.vjReady || !rs.vkReady) continue;
+            
+            // Only start execution if dependencies cleared in a previous cycle
+            if (rs.instruction.execStartTime == 0) {
+                if (rs.lastDepClearCycle == 0 || cycle > rs.lastDepClearCycle) {
+                    rs.instruction.execStartTime = cycle;
+                } else {
+                    continue; // Wait one more cycle
+                }
+            }
+            
+            if (rs.cyclesLeft > 0) {
+                rs.cyclesLeft--;
+                if (rs.cyclesLeft == 0) {
+                    rs.instruction.execEndTime = cycle;
+                }
+            }
+        }
     }
-
+    
+    private void executeLoads() {
+        for (LoadBuffer lb : loadBuffers) {
+            if (!lb.busy) continue;
+            if (!lb.baseReady) continue;
+            
+            if (lb.instruction.execStartTime == 0) {
+                if (lb.lastDepClearCycle == 0 || cycle > lb.lastDepClearCycle) {
+                    lb.instruction.execStartTime = cycle;
+                } else {
+                    continue;
+                }
+            }
+            
+            if (lb.cyclesLeft > 0) {
+                lb.cyclesLeft--;
+                if (lb.cyclesLeft == 0) {
+                    lb.instruction.execEndTime = cycle;
+                }
+            }
+        }
+    }
+    
+    private void executeStores() {
+        for (StoreBuffer sb : storeBuffers) {
+            if (!sb.busy) continue;
+            if (!sb.baseReady || !sb.valueReady) continue;
+            
+            if (sb.instruction.execStartTime == 0) {
+                if (sb.lastDepClearCycle == 0 || cycle > sb.lastDepClearCycle) {
+                    sb.instruction.execStartTime = cycle;
+                } else {
+                    continue;
+                }
+            }
+            
+            if (sb.cyclesLeft > 0) {
+                sb.cyclesLeft--;
+                if (sb.cyclesLeft == 0) {
+                    sb.instruction.execEndTime = cycle;
+                }
+            }
+        }
+    }
+    
+    private void writeBack() {
+        writeBackStations(addSubStations);
+        writeBackStations(mulDivStations);
+        writeBackLoads();
+        writeBackStores();
+    }
+    
+    private void writeBackStations(List<ReservationStation> stations) {
+        for (ReservationStation rs : stations) {
+            if (!rs.busy) continue;
+            if (rs.cyclesLeft != 0) continue;
+            if (rs.instruction.execEndTime != cycle - 1) continue;
+            
+            double result = computeResult(rs);
+            broadcast(rs.name, result);
+            
+            String dest = rs.instruction.rd;
+            registerFile.setValue(dest, result);
+            if (rs.name.equals(registerFile.getTag(dest))) {
+                registerFile.setTag(dest, null);
+            }
+            
+            rs.instruction.writeTime = cycle;
+            rs.clear();
+        }
+    }
+    
+    private void writeBackLoads() {
+        for (LoadBuffer lb : loadBuffers) {
+            if (!lb.busy) continue;
+            if (lb.cyclesLeft != 0) continue;
+            if (lb.instruction.execEndTime != cycle - 1) continue;
+            
+            double result = 1.0; // Simplified load
+            broadcast(lb.name, result);
+            
+            String dest = lb.instruction.rd;
+            registerFile.setValue(dest, result);
+            if (lb.name.equals(registerFile.getTag(dest))) {
+                registerFile.setTag(dest, null);
+            }
+            
+            lb.instruction.writeTime = cycle;
+            lb.clear();
+        }
+    }
+    
+    private void writeBackStores() {
+        for (StoreBuffer sb : storeBuffers) {
+            if (!sb.busy) continue;
+            if (sb.cyclesLeft != 0) continue;
+            if (sb.instruction.execEndTime != cycle - 1) continue;
+            
+            sb.instruction.writeTime = cycle;
+            sb.clear();
+        }
+    }
+    
+    private void broadcast(String tag, double value) {
+        for (ReservationStation rs : addSubStations) {
+            if (tag.equals(rs.qj)) {
+                rs.vj = value;
+                rs.qj = null;
+                rs.vjReady = true;
+                rs.lastDepClearCycle = cycle;
+            }
+            if (tag.equals(rs.qk)) {
+                rs.vk = value;
+                rs.qk = null;
+                rs.vkReady = true;
+                rs.lastDepClearCycle = cycle;
+            }
+        }
+        
+        for (ReservationStation rs : mulDivStations) {
+            if (tag.equals(rs.qj)) {
+                rs.vj = value;
+                rs.qj = null;
+                rs.vjReady = true;
+                rs.lastDepClearCycle = cycle;
+            }
+            if (tag.equals(rs.qk)) {
+                rs.vk = value;
+                rs.qk = null;
+                rs.vkReady = true;
+                rs.lastDepClearCycle = cycle;
+            }
+        }
+        
+        for (LoadBuffer lb : loadBuffers) {
+            if (tag.equals(lb.qBase)) {
+                lb.vBase = value;
+                lb.qBase = null;
+                lb.baseReady = true;
+                lb.lastDepClearCycle = cycle;
+            }
+        }
+        
+        for (StoreBuffer sb : storeBuffers) {
+            if (tag.equals(sb.qBase)) {
+                sb.vBase = value;
+                sb.qBase = null;
+                sb.baseReady = true;
+                sb.lastDepClearCycle = cycle;
+            }
+            if (tag.equals(sb.qValue)) {
+                sb.vValue = value;
+                sb.qValue = null;
+                sb.valueReady = true;
+                sb.lastDepClearCycle = cycle;
+            }
+        }
+    }
+    
     private double computeResult(ReservationStation rs) {
-        // Simplified computation, should be done in EXECUTE for a real system
-        if (rs.op.startsWith("ADD")) return rs.Vj + rs.Vk;
-        if (rs.op.startsWith("SUB")) return rs.Vj - rs.Vk;
-        if (rs.op.startsWith("MUL")) return rs.Vj * rs.Vk;
-        if (rs.op.startsWith("DIV")) return rs.Vj / rs.Vk;
-        if (rs.op.startsWith("L.D")) return 1.0; // Mock memory access result
+        String op = rs.operation;
+        if (op.equals("ADD.D")) return rs.vj + rs.vk;
+        if (op.equals("SUB.D")) return rs.vj - rs.vk;
+        if (op.equals("MUL.D")) return rs.vj * rs.vk;
+        if (op.equals("DIV.D")) return rs.vj / rs.vk;
         return 0.0;
     }
-
-    private boolean anyBusy() {
-        return intRS.stream().anyMatch(rs -> rs.busy) ||
-               fpAddRS.stream().anyMatch(rs -> rs.busy) ||
-               fpMulRS.stream().anyMatch(rs -> rs.busy) ||
-               loadBuffers.stream().anyMatch(rs -> rs.busy) ||
-               storeBuffers.stream().anyMatch(rs -> rs.busy);
+    
+    private ReservationStation findFreeStation(List<ReservationStation> stations) {
+        for (ReservationStation rs : stations) {
+            if (!rs.busy) return rs;
+        }
+        return null;
+    }
+    
+    private LoadBuffer findFreeLoad() {
+        for (LoadBuffer lb : loadBuffers) {
+            if (!lb.busy) return lb;
+        }
+        return null;
+    }
+    
+    private StoreBuffer findFreeStore() {
+        for (StoreBuffer sb : storeBuffers) {
+            if (!sb.busy) return sb;
+        }
+        return null;
+    }
+    
+    private boolean isComplete() {
+        if (pc < instructions.size()) return false;
+        
+        for (ReservationStation rs : addSubStations) {
+            if (rs.busy) return false;
+        }
+        for (ReservationStation rs : mulDivStations) {
+            if (rs.busy) return false;
+        }
+        for (LoadBuffer lb : loadBuffers) {
+            if (lb.busy) return false;
+        }
+        for (StoreBuffer sb : storeBuffers) {
+            if (sb.busy) return false;
+        }
+        
+        return true;
+    }
+    
+    private void printResults() {
+        System.out.println("\n=== Instruction Status Table ===");
+        System.out.printf("%-20s | %-6s | %-6s | %-6s | %-6s%n",
+            "Instruction", "Issue", "Exec S", "Exec E", "Write");
+        System.out.println("----------------------------------------------------------");
+        
+        for (Instruction instr : instructions) {
+            System.out.printf("%-20s | %-6d | %-6s | %-6s | %-6s%n",
+                instr.raw,
+                instr.issueTime,
+                instr.execStartTime > 0 ? instr.execStartTime : "-",
+                instr.execEndTime > 0 ? instr.execEndTime : "-",
+                instr.writeTime > 0 ? instr.writeTime : "-");
+        }
     }
     
     public static void main(String[] args) {
-        // You MUST create a file named "program1.txt" with the instructions:
-        /*
-        L.D F6, 32(R2)
-        L.D F2, 44(R3)
-        MUL.D F0, F2, F4
-        SUB.D F8, F2, F6
-        DIV.D F10, F0, F6
-        ADD.D F6, F8, F2
-        */
-        
-        TomasuloSimulator sim = new TomasuloSimulator();
-        
-        if (sim.loadProgram("program1.txt")) {
-            // Set initial register values used in the trace
-            sim.regFile.setValue("R2", 100.0);
-            sim.regFile.setValue("R3", 200.0); 
-            sim.regFile.setValue("F4", 2.0); 
+        try {
+            TomasuloSimulator sim = new TomasuloSimulator();
+            sim.loadProgram("program1.txt");
+            sim.setRegister("R2", 100.0);
+            sim.setRegister("R3", 200.0);
+            sim.setRegister("F4", 2.0);
             sim.run();
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 }

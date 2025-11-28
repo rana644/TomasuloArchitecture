@@ -1,32 +1,28 @@
-class ReservationStation {
+class LoadBuffer {
     String name;
     boolean busy = false;
     String operation;
-    double vj = 0.0;
-    double vk = 0.0;
-    String qj = null;
-    String qk = null;
-    boolean vjReady = false;
-    boolean vkReady = false;
+    int address = 0;
+    double vBase = 0.0;
+    String qBase = null;
+    boolean baseReady = false;
     int cyclesLeft = 0;
     int lastDepClearCycle = 0;
     Instruction instruction;
     
-    public ReservationStation(String name) {
+    public LoadBuffer(String name) {
         this.name = name;
     }
     
     public void clear() {
         busy = false;
         operation = null;
-        vj = 0.0;
-        vk = 0.0;
-        qj = null;
-        qk = null;
-        vjReady = false;
-        vkReady = false;
+        address = 0;
+        vBase = 0.0;
+        qBase = null;
+        baseReady = false;
         cyclesLeft = 0;
         lastDepClearCycle = 0;
         instruction = null;
     }
-}
+} 

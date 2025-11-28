@@ -1,34 +1,36 @@
-import java.util.HashMap;
 import java.util.Map;
+import java.util.HashMap;
 
-public class RegisterFile {
-    private Map<String, Double> values = new HashMap<>();
-    public Map<String, String> rrsStatus = new HashMap<>(); // Register Name -> Reservation Station Tag
-    private boolean barrierActive = false; // For enforcing sequential execution of Int/Branch
-
+class RegisterFile {
+    private Map<String, Double> values;
+    private Map<String, String> tags;
+    
     public RegisterFile() {
-        // Initialize F0-F31 and R1-R31 with default values and clear RRS
+        values = new HashMap<String, Double>();
+        tags = new HashMap<String, String>();
+        
         for (int i = 0; i <= 31; i++) {
             values.put("F" + i, 0.0);
             values.put("R" + i, 0.0);
-            rrsStatus.put("F" + i, "");
-            rrsStatus.put("R" + i, "");
+            tags.put("F" + i, null);
+            tags.put("R" + i, null);
         }
     }
-
+    
     public double getValue(String reg) {
-        return values.getOrDefault(reg, 0.0);
+        Double val = values.get(reg);
+        return val != null ? val : 0.0;
     }
-
+    
     public void setValue(String reg, double value) {
         values.put(reg, value);
     }
     
-    public boolean isBarrierActive() {
-        return barrierActive;
+    public String getTag(String reg) {
+        return tags.get(reg);
     }
-
-    public void setBarrierActive(boolean active) {
-        this.barrierActive = active;
+    
+    public void setTag(String reg, String tag) {
+        tags.put(reg, tag);
     }
 }
