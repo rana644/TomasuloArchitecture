@@ -1,4 +1,3 @@
-
 import java.io.*;
 import java.util.*;
 
@@ -6,6 +5,7 @@ public class TomasuloSimulator {
     
     private List<Instruction> instructions;
     private RegisterFile registerFile;
+    private Memory memory;
     private List<ReservationStation> addSubStations;
     private List<ReservationStation> mulDivStations;
     private List<LoadBuffer> loadBuffers;
@@ -17,6 +17,7 @@ public class TomasuloSimulator {
     public TomasuloSimulator() {
         instructions = new ArrayList<Instruction>();
         registerFile = new RegisterFile();
+        memory = new Memory(4096); // 4KB memory
         addSubStations = new ArrayList<ReservationStation>();
         mulDivStations = new ArrayList<ReservationStation>();
         loadBuffers = new ArrayList<LoadBuffer>();
@@ -65,6 +66,14 @@ public class TomasuloSimulator {
         registerFile.setValue(reg, value);
     }
     
+    public void initializeMemory(int address, double value) {
+        memory.initializeMemory(address, value);
+    }
+    
+    public double readMemory(int address) {
+        return memory.readDouble(address);
+    }
+    
     public void run() {
         System.out.println("\n=== Starting Simulation ===\n");
         
@@ -97,6 +106,26 @@ public class TomasuloSimulator {
         }
         
         if (station == null) return;
+        
+        // ADDRESS CLASH DETECTION for Load/Store instructions
+        if (op.equals("L.D") || op.equals("S.D")) {
+            // Calculate the effective address for this instruction
+            String baseReg = instr.rs1;
+            int offset = instr.immediate;
+            int effectiveAddr = (int)registerFile.getValue(baseReg) + offset;
+            
+            if (op.equals("L.D")) {
+                // Load: Check if any STORE buffer has the same address
+                if (hasAddressClashWithStores(effectiveAddr)) {
+                    return; // Cannot issue, address clash with pending store
+                }
+            } else if (op.equals("S.D")) {
+                // Store: Check if any LOAD or STORE buffer has the same address
+                if (hasAddressClashWithLoads(effectiveAddr) || hasAddressClashWithStores(effectiveAddr)) {
+                    return; // Cannot issue, address clash with pending load/store
+                }
+            }
+        }
         
         if (station instanceof LoadBuffer) {
             LoadBuffer lb = (LoadBuffer) station;
@@ -213,6 +242,8 @@ public class TomasuloSimulator {
             if (lb.instruction.execStartTime == 0) {
                 if (lb.lastDepClearCycle == 0 || cycle > lb.lastDepClearCycle) {
                     lb.instruction.execStartTime = cycle;
+                    // Calculate effective address when execution starts
+                    lb.effectiveAddress = (int)lb.vBase + lb.address;
                 } else {
                     continue;
                 }
@@ -222,6 +253,8 @@ public class TomasuloSimulator {
                 lb.cyclesLeft--;
                 if (lb.cyclesLeft == 0) {
                     lb.instruction.execEndTime = cycle;
+                    // Perform the actual load from memory
+                    lb.loadedValue = memory.readDouble(lb.effectiveAddress);
                 }
             }
         }
@@ -235,6 +268,8 @@ public class TomasuloSimulator {
             if (sb.instruction.execStartTime == 0) {
                 if (sb.lastDepClearCycle == 0 || cycle > sb.lastDepClearCycle) {
                     sb.instruction.execStartTime = cycle;
+                    // Calculate effective address when execution starts
+                    sb.effectiveAddress = (int)sb.vBase + sb.address;
                 } else {
                     continue;
                 }
@@ -244,6 +279,8 @@ public class TomasuloSimulator {
                 sb.cyclesLeft--;
                 if (sb.cyclesLeft == 0) {
                     sb.instruction.execEndTime = cycle;
+                    // Perform the actual store to memory
+                    memory.writeDouble(sb.effectiveAddress, sb.vValue);
                 }
             }
         }
@@ -282,7 +319,8 @@ public class TomasuloSimulator {
             if (lb.cyclesLeft != 0) continue;
             if (lb.instruction.execEndTime != cycle - 1) continue;
             
-            double result = 1.0; // Simplified load
+            // Use the value loaded from memory
+            double result = lb.loadedValue;
             broadcast(lb.name, result);
             
             String dest = lb.instruction.rd;
@@ -393,6 +431,46 @@ public class TomasuloSimulator {
         return null;
     }
     
+    // Check if effective address clashes with any busy store buffer
+    private boolean hasAddressClashWithStores(int address) {
+        for (StoreBuffer sb : storeBuffers) {
+            if (sb.busy) {
+                // We need to compute the store's effective address
+                // If base is ready, we can compute it
+                if (sb.baseReady) {
+                    int storeAddr = (int)sb.vBase + sb.address;
+                    if (storeAddr == address) {
+                        return true; // Address clash detected
+                    }
+                } else {
+                    // Base not ready yet, conservatively assume clash
+                    // (or we could wait until base is ready)
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    
+    // Check if effective address clashes with any busy load buffer
+    private boolean hasAddressClashWithLoads(int address) {
+        for (LoadBuffer lb : loadBuffers) {
+            if (lb.busy) {
+                // We need to compute the load's effective address
+                if (lb.baseReady) {
+                    int loadAddr = (int)lb.vBase + lb.address;
+                    if (loadAddr == address) {
+                        return true; // Address clash detected
+                    }
+                } else {
+                    // Base not ready yet, conservatively assume clash
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    
     private boolean isComplete() {
         if (pc < instructions.size()) return false;
         
@@ -432,10 +510,26 @@ public class TomasuloSimulator {
         try {
             TomasuloSimulator sim = new TomasuloSimulator();
             sim.loadProgram("program1.txt");
+            
+            // Initialize registers
             sim.setRegister("R2", 100.0);
-            sim.setRegister("R3", 200.0);
-            sim.setRegister("F4", 2.0);
+            sim.setRegister("F1", 1.0);
+            sim.setRegister("F3", 3.0);
+            sim.setRegister("F5", 5.0);
+            
+            // Initialize memory at addresses that will be accessed
+            sim.initializeMemory(100, 10.0);  // For L.D F6, 0(R2) where R2=100
+            sim.initializeMemory(108, 20.0);  // For L.D F2, 20(R2) where R2=100
+            sim.initializeMemory(116, 30.0);  // For L.D F2, 0(R3) where R3=200
+            
             sim.run();
+            
+            // Show memory after stores (if any)
+            System.out.println("\n=== Memory Contents (selected addresses) ===");
+            System.out.printf("Address 100: %.2f%n", sim.readMemory(100));
+            System.out.printf("Address 108: %.2f%n", sim.readMemory(108));
+            System.out.printf("Address 116: %.2f%n", sim.readMemory(116));
+            
         } catch (Exception e) {
             e.printStackTrace();
         }

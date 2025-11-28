@@ -11,6 +11,7 @@ class StoreBuffer {
     boolean valueReady = false;
     int cyclesLeft = 0;
     int lastDepClearCycle = 0;
+    int effectiveAddress = 0;
     Instruction instruction;
     
     public StoreBuffer(String name) {
@@ -29,6 +30,7 @@ class StoreBuffer {
         valueReady = false;
         cyclesLeft = 0;
         lastDepClearCycle = 0;
+        effectiveAddress = 0;
         instruction = null;
     }
 }

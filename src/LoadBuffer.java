@@ -8,6 +8,8 @@ class LoadBuffer {
     boolean baseReady = false;
     int cyclesLeft = 0;
     int lastDepClearCycle = 0;
+    int effectiveAddress = 0;
+    double loadedValue = 0.0;
     Instruction instruction;
     
     public LoadBuffer(String name) {
@@ -23,6 +25,9 @@ class LoadBuffer {
         baseReady = false;
         cyclesLeft = 0;
         lastDepClearCycle = 0;
+        effectiveAddress = 0;
+        loadedValue = 0.0;
         instruction = null;
     }
-} 
+
+}
